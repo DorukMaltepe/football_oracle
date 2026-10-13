@@ -1,0 +1,7 @@
+pandas>=2.2
+numpy
+scipy
+scikit-learn==1.8.0
+streamlit>=1.45
+requests
+pytest
