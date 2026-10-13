@@ -13,6 +13,9 @@ import apifootball
 import data
 import features as F
 import fpl
+import sofascore
+import transfermarkt
+import understat
 
 
 def classifier():
@@ -59,19 +62,47 @@ def run():
     except requests.RequestException as e:  # player data is optional: the model handles missing features
         print(f"FPL: {e}")
         epl_apps = epl_out = None
-    af = apifootball.load(results)
-    apps = pd.concat([epl_apps, af["apps"]], ignore_index=True)
-    unavailable = pd.concat([epl_out, af["unavailable"]], ignore_index=True)
+    af, ss = apifootball.load(results), sofascore.load(results)
+    tm, us = transfermarkt.load(results), understat.load(results)
+    keys = ["Div", "Season", "HomeTeam", "AwayTeam"]
+    # first non-empty value wins: xG from Understat (Top 5), then Sofascore; referees from football-data (England),
+    # then Sofascore, then Transfermarkt
+    extra = pd.concat([us, ss["matches"], tm["matches"]]).groupby(keys, sort=False).first().reset_index()
+    results = results.merge(extra, on=keys, how="left", suffixes=("", "_x"))
+    results["Referee"] = results.Referee.fillna(results.pop("Referee_x"))
+    # Sofascore and Transfermarkt key players by name, so their line-ups form one history per team (Transfermarkt up
+    # to last season, Sofascore since; Sofascore wins where both have a match, it has ratings). The Premier League
+    # uses FPL, which matches its injury list; API-Football only fills leagues neither covers.
+    tm_apps = tm["apps"][(tm["apps"].Div != "E0")
+                         & ~pd.MultiIndex.from_frame(tm["apps"][keys]).isin(pd.MultiIndex.from_frame(ss["apps"][keys]))]
+    named = pd.concat([ss["apps"], tm_apps])
+    apps = pd.concat([epl_apps, named, af["apps"][~af["apps"].Div.isin(named.Div)]], ignore_index=True)
+    apps = transfermarkt.market_values(apps.merge(results[[*keys, "Date"]], on=keys), tm)
+    unavailable = pd.concat([epl_out, ss["unavailable"], af["unavailable"][~af["unavailable"].team.isin(named.team)]],
+                            ignore_index=True)
+    formations = pd.concat([ss["formations"], tm["formations"], af["formations"]]).dropna(subset=["formation"])
+    formations = formations.drop_duplicates([*keys, "team"])
+    managers = pd.concat([ss["managers"], tm["managers"]]).assign(date=lambda d: pd.to_datetime(d.date))
+    coaches = data.manager_stints(managers.drop_duplicates(["team", "date"]))
+    # API-Football careers only fill in before a club's first match with a known manager
+    first = coaches.groupby("team").start.min()
+    old = pd.to_datetime(af["coaches"].start, errors="coerce") < af["coaches"].team.map(first)
+    coaches = pd.concat([coaches, af["coaches"][old | ~af["coaches"].team.isin(first.index)]], ignore_index=True)
     df = F.build(pd.concat([results, upcoming], ignore_index=True), weather,
-                 apps, unavailable, af["formations"], af["coaches"])
+                 apps, unavailable, formations, coaches)
     played, future = df[df.FTHG.notna()], df[df.FTHG.isna()].copy()
 
     metrics = backtest(played, data.current_season() - 1)
     recent = played[played.Season >= data.current_season() - 1]
     metrics["coverage"] = {data.LEAGUES[d][0]: {"line-ups": float(g.h_lu_missing.notna().mean()),
-                                                "managers": float(g.h_mgr_games.notna().mean())}
+                                                "player ratings": float(g.h_lu_rating.notna().mean()),
+                                                "market values": float(g.h_lu_value.notna().mean()),
+                                                "managers": float(g.h_mgr_games.notna().mean()),
+                                                "xG": float(g.HxG.notna().mean()),
+                                                "referees": float(g.ref_n.notna().mean())}
                            for d, g in recent.groupby("Div")}
     metrics["api_football"] = af["status"]
+    metrics["sofascore"] = ss["status"]
     print(json.dumps(metrics, indent=1))
 
     # two models: one using bookmaker odds, one without for fixtures whose odds aren't published yet

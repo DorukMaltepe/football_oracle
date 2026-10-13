@@ -19,7 +19,8 @@ FORM_LABELS = {
     "elo": "Elo rating", "pts_5": "Points / game (last 5)", "pts_10": "Points / game (last 10)",
     "gf_5": "Goals scored / game (last 5)", "ga_5": "Goals conceded / game (last 5)",
     "sf_5": "Shots / game (last 5)", "stf_5": "Shots on target / game (last 5)",
-    "sta_5": "Shots on target conceded (last 5)", "cf_5": "Corners / game (last 5)",
+    "sta_5": "Shots on target conceded (last 5)", "xg_5": "Expected goals / game (last 5)",
+    "xga_5": "Expected goals conceded / game (last 5)", "cf_5": "Corners / game (last 5)",
     "yc_10": "Yellow cards / game (last 10)", "rc_10": "Red cards / game (last 10)",
     "v_pts_5": "Home/away form: points / game (last 5 at this venue type)",
     "v_gf_5": "Home/away form: goals scored", "v_ga_5": "Home/away form: goals conceded",
@@ -29,6 +30,7 @@ SQUAD_LABELS = {
     "coach_name": "Manager", "mgr_games": "Manager: league games in data", "mgr_ppg": "Manager: points / game",
     "mgr_team_games": "Manager: games at this club", "mgr_days": "Manager: days in the job",
     "lu_missing": "Regular starters missing (of 11)", "lu_rating": "Line-up form (player ratings, 0 = average)",
+    "lu_value": "Line-up market value (typical player, €m)",
     "lu_def": "Formation: defenders", "lu_fwd": "Formation: forwards", "lu_out": "Regulars out",
 }
 
@@ -83,6 +85,11 @@ else:
     st.sidebar.caption(f"API-Football: {af['used_today']}/{af['daily_budget']} requests used today, "
                        f"{af['fixtures_with_lineups']:,} matches with line-ups cached"
                        + (f", seasons {af['allowed_seasons'][0]}–{af['allowed_seasons'][1]} on this plan" if af.get("allowed_seasons") else ""))
+ss = metrics.get("sofascore")
+if ss:
+    st.sidebar.caption(f"Sofascore: {ss['matches_scraped']:,} of {ss['finished_matches']:,} matches scraped "
+                       f"({ss['requests_this_run']} requests last refresh"
+                       + (", stopped: Sofascore is refusing requests, try again later)" if ss.get("blocked") else ")"))
 leagues = st.sidebar.multiselect("Leagues", list(NAMES), default=list(NAMES), format_func=NAMES.get)
 days = st.sidebar.slider("Days ahead", 1, 180, 14)
 
@@ -149,8 +156,11 @@ if event.selection.rows:
         st.dataframe(pd.Series(ctx, name="").to_frame(), width="stretch")
 
     st.markdown("**Squad & manager**")
-    st.dataframe(pd.DataFrame({m.HomeTeam: [fmt(m.get(f"h_{k}")) for k in SQUAD_LABELS],
-                               m.AwayTeam: [fmt(m.get(f"a_{k}")) for k in SQUAD_LABELS]},
+    squad = {s: {k: m.get(f"{s}_{k}") for k in SQUAD_LABELS} for s in "ha"}
+    for s in squad:  # stored as mean log10 EUR
+        squad[s]["lu_value"] = 10 ** squad[s]["lu_value"] / 1e6 if pd.notna(squad[s]["lu_value"]) else None
+    st.dataframe(pd.DataFrame({m.HomeTeam: [fmt(squad["h"][k]) for k in SQUAD_LABELS],
+                               m.AwayTeam: [fmt(squad["a"][k]) for k in SQUAD_LABELS]},
                               index=list(SQUAD_LABELS.values())), width="stretch")
     left, right = st.columns(2)
     for col, team in ((left, m.HomeTeam), (right, m.AwayTeam)):

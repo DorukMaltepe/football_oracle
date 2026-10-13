@@ -48,6 +48,13 @@ ALIASES = {
     "Go Ahead Eagles": "Go Ahead Eagles", "Sparta Rotterdam": "Sparta Rotterdam", "NEC": "Nijmegen",
     "RC Deportivo": "La Coruna", "R. Racing Club": "Santander", "Olympique Lyonnais": "Lyon",
     "Excelsior Rotterdam": "Excelsior", "AZ": "AZ Alkmaar", "N.E.C. Nijmegen": "Nijmegen",
+    # Sofascore names
+    "Wolverhampton": "Wolves", "Leeds United": "Leeds", "Real Racing Club": "Santander", "Chievo Verona": "Chievo",
+    "Hellas Verona": "Verona", "Başakşehir FK": "Buyuksehyr", "Ankaraspor": "Osmanlispor",
+    # Transfermarkt names
+    "Real Betis Balompié": "Betis", "RCD Espanyol Barcelona": "Espanol", "Athletic Bilbao": "Ath Bilbao",
+    "FC Barcelona": "Barcelona", "Società Sportiva Lazio S.p.A.": "Lazio", "Associazione Sportiva Roma": "Roma",
+    "Pisa Sporting Club": "Pisa", "Ajax Amsterdam": "Ajax", "Basaksehir FK": "Buyuksehyr",
 }
 
 
@@ -58,7 +65,7 @@ def current_season(today=None):
 
 def _get(url, path, refresh=False, **kw):
     if refresh or not path.exists():
-        r = requests.get(url, timeout=60, headers={"User-Agent": "football-oracle/0.1"}, **kw)
+        r = requests.get(url, timeout=60, **{**kw, "headers": {"User-Agent": "football-oracle/0.1", **kw.get("headers", {})}})
         r.raise_for_status()
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(r.content)
@@ -105,6 +112,23 @@ def _norm(name):
     drop = {"fc", "cf", "afc", "sc", "ac", "as", "ssc", "us", "ogc", "rc", "cd", "ud", "sv", "vfb", "vfl",
             "tsg", "bv", "sk", "fk", "rcd", "de", "1.", "04", "05", "1846", "1899", "1900", "1907", "1910"}
     return " ".join(t for t in s.replace("-", " ").split() if t not in drop)
+
+
+def person(name):
+    """'Vinícius Júnior' -> 'vinicius junior': the player/manager key shared by all sources."""
+    return " ".join(unicodedata.normalize("NFKD", str(name)).encode("ascii", "ignore").decode().lower().split())
+
+
+def manager_stints(rows):
+    """One row per team per match (team, date, coach, coach_name) -> spells of consecutive matches under one
+    manager: team, coach, coach_name, start, end. Each team's latest spell stays open (end None).
+    shortcut: a spell "starts" at its first match in this data, not the appointment date; fine since 2015/16"""
+    m = rows.assign(date=pd.to_datetime(rows.date)).sort_values(["team", "date"])
+    spell = (m.coach != m.groupby("team").coach.shift()).cumsum().rename("spell")
+    m = m.groupby(["team", spell]).agg(coach=("coach", "first"), coach_name=("coach_name", "first"),
+                                        start=("date", "min"), end=("date", "max")).reset_index("team")
+    m.loc[~m.team.duplicated(keep="last"), "end"] = None
+    return m[["team", "coach", "coach_name", "start", "end"]].reset_index(drop=True)
 
 
 def map_names(fx_names, fd_names):

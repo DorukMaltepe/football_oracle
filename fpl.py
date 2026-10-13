@@ -4,7 +4,6 @@
 Player performance is FPL's BPS (bonus points system), a per-match score built from ~30 Opta stats."""
 import json
 import re
-import unicodedata
 
 import pandas as pd
 
@@ -18,8 +17,7 @@ CACHE = data.CACHE / "fpl"
 
 def _name(s):
     """'Aaron_Cresswell_402' (older seasons) and 'Aaron Cresswell' -> 'aaron cresswell'."""
-    s = re.sub(r"_\d+$", "", str(s)).replace("_", " ")
-    return " ".join(unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode().lower().split())
+    return data.person(re.sub(r"_\d+$", "", str(s)).replace("_", " "))
 
 
 def _json(url, path, refresh):

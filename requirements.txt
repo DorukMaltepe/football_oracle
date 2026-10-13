@@ -4,4 +4,5 @@ scipy
 scikit-learn==1.8.0
 streamlit>=1.45
 requests
+curl_cffi
 pytest

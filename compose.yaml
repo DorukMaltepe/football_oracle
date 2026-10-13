@@ -1,0 +1,11 @@
+services:
+  app:
+    build: .
+    ports:
+      - "8501:8501"
+    environment:
+      - APIFOOTBALL_KEY
+      - APIFOOTBALL_DAILY_BUDGET
+      - SOFASCORE_RUN_BUDGET
+    volumes:
+      - ./data:/app/data  # keeps downloads, cache and trained models between runs
