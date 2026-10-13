@@ -37,7 +37,7 @@ The first launch downloads about 11 seasons of data, geocodes the stadiums and t
 docker compose up --build
 ```
 
-Open http://localhost:8501. Data and trained models are kept in `./data`. Set `APIFOOTBALL_KEY` in your shell (or a `.env` file) before running, and it is passed into the container. Tests: `docker compose run --rm app pytest`.
+Open http://localhost:8501. Data and trained models are kept in `./data`. `APIFOOTBALL_KEY`, `APIFOOTBALL_DAILY_BUDGET` and `SOFASCORE_RUN_BUDGET` are passed into the container from your shell or a `.env` file. Tests: `docker compose run --rm app pytest`. Sofascore backfill: `docker compose run --rm -e SOFASCORE_RUN_BUDGET=200000 app python sofascore.py`.
 
 ### Sofascore backfill
 
@@ -71,7 +71,7 @@ The free plan allows 100 requests a day. Every response is cached on disk, and t
 - **Match view** (click a row):
   - probabilities against the market, and expected goals
   - side-by-side team form: Elo, points, goals, expected goals, shots, corners, cards, home or away form, rest days
-  - squad and manager: current manager and record, regular starters missing, line-up form, formation
+  - squad and manager: current manager and record, regular starters missing, line-up form, line-up market value, formation
   - every injured, suspended or doubtful player with the reason (e.g. "Hamstring injury - Expected back 1 Nov")
   - head-to-head record, recent results, referee tendencies, weather forecast and odds
   - latest news for both teams, with injury, suspension and manager stories flagged ⚠️
@@ -169,9 +169,11 @@ For **upcoming** matches the XI isn't known until about an hour before kick-off.
 
 | Factor | Why not | Partial stand-in |
 |---|---|---|
-| News | No historical news archive to train on | Shown in the UI, keywords flagged; injury news enters through the FPL / API-Football availability data |
+| News | No historical news archive to train on | Shown in the UI, keywords flagged; injury news enters through the FPL / Sofascore availability data |
 | Pitch quality | No dataset exists | Each team's home form |
-| Player data before 2016/17 (EPL) or before the free plan's seasons (other leagues) | Not in the free sources | The model treats those matches as having no player data |
+| Player ratings outside the Premier League for past seasons | Transfermarkt has none; Sofascore has them but needs about a day of scraping | Squad market value; the Sofascore backfill adds them |
+| xG for the Eredivisie and Süper Lig | Understat doesn't cover them; Sofascore has it only for matches scraped so far | Shots and shots on target |
+| Player data before 2016/17 (EPL) | FPL's archive starts in 2016/17 | Transfermarkt XIs and market values |
 
 ## Design decisions
 
@@ -198,7 +200,7 @@ Responses are cached on disk forever (lists and injuries are refreshed daily), s
 
 **Line-up features that also work before the line-up is known.** "Regular starters missing" is defined the same way for history (who actually started) and for upcoming matches (who is unavailable). The model learns how much missing regulars matter, and a prediction uses the latest injury list. One trade-off: in history the count also includes rotation, which can't be known in advance.
 
-**Gradient-boosted trees (scikit-learn `HistGradientBoosting*`).** The data is about 27k rows of mixed numbers, a good fit for boosted trees. They handle missing values natively, which matters here. Expected goals and non-English referees exist only for matches scraped so far, shot statistics are missing for the 2015/16 and 2016/17 Eredivisie and Süper Lig seasons, player data only covers some seasons, and weather is unavailable for some stadiums. Missing values go straight to the model; nothing is filled in. The league is used as a native categorical feature.
+**Gradient-boosted trees (scikit-learn `HistGradientBoosting*`).** The data is about 27k rows of mixed numbers, a good fit for boosted trees. They handle missing values natively, which matters here. Player ratings exist only for the Premier League and Sofascore-scraped matches, xG is missing for Eredivisie and Süper Lig matches not yet scraped, the current season's line-ups wait on Sofascore, shot statistics are missing for the 2015/16 and 2016/17 Eredivisie and Süper Lig seasons, player data only covers some seasons, and weather is unavailable for some stadiums. Missing values go straight to the model; nothing is filled in. The league is used as a native categorical feature.
 
 **One feature pipeline for past and future matches.** Upcoming fixtures are added to the match history with blank results, and every feature is computed with `shift(1)`. A match's features therefore come only from earlier matches, whether it was played years ago or kicks off tomorrow. This prevents the most common bug in sports models, leaking the result into the features. It also guarantees training and prediction use identical code. `test_features.py` asserts the no-leakage property.
 
@@ -214,7 +216,7 @@ Responses are cached on disk forever (lists and injuries are refreshed daily), s
 
 **Flat files instead of a database or server.** This is a single-user local tool, so cached CSVs plus pickled outputs are enough. Streamlit provides the UI with no front-end build step.
 
-**Team-name mapping: fuzzy matching plus aliases.** The two fixture sources spell clubs differently ("Manchester United" vs "Man United"). Names are fuzzy-matched within each league, and an `ALIASES` table in `data.py` overrides the known failures. If two names map to the same club, a warning tells you which alias to add.
+**Team-name mapping: fuzzy matching plus aliases.** Every source spells clubs differently ("Man United", "Manchester United", "Società Sportiva Lazio S.p.A."). Each source's names are fuzzy-matched to football-data.co.uk's within each league and season, and an `ALIASES` table in `data.py` overrides the known failures. If two names map to the same club, a warning tells you which alias to add.
 
 **Stadiums are geocoded once and stored in an editable CSV.** Lookups are limited to the league's country, which prevents results such as a "Johan Cruyff Arena" in Malta. Manual corrections in `data/stadiums.csv` are never overwritten.
 
@@ -232,9 +234,15 @@ Backtest from 13 Oct 2026: trained on 2015/16–2024/25, tested on 2,796 matches
 | Bookmakers | 53.3% | 0.977 |
 | Always pick home win | 43.6% | – |
 
-The model is roughly level with the bookmakers. That is typical: football has a lot of randomness, and the market already prices in line-ups, injuries and manager changes.
+The model is roughly level with the bookmakers. That is typical: football has a lot of randomness, and the market already prices in line-ups, injuries and manager changes. In more detail, on the same test matches:
 
-This run has line-ups, market values, managers and referees for 98% of matches in every league up to 2025/26, and xG for every Top 5 league match. The current season is thinner (about 40% of matches) until Sofascore has scraped it. Even so, the squad and manager features don't measurably improve the model. Most of their information is probably already in the bookmakers' odds, which the model also uses. The coverage table under **Model accuracy** in the UI shows how much player and manager data each league has. Each retrain refreshes all of these numbers.
+- **Calibrated:** when the model gives a result 75%, it happens about 76% of the time, and its average home / draw / away probabilities (44 / 25 / 32%) match the actual shares (44 / 26 / 30%).
+- **Close to the market in every league:** slightly better log loss in Serie A, the Eredivisie and the Süper Lig, slightly worse in the Premier League, La Liga and the Bundesliga. With 350–460 matches per league, these differences are within noise.
+- **Rarely picks a draw** (28 of 2,796), although 26% of matches are draws. A draw is seldom the single most likely result; the draw probability itself is calibrated.
+- **No betting edge:** backing every pick the model rates above the market loses about 6% per bet at average odds, roughly the bookmakers' margin.
+- **Scorelines are weak:** the exact score is right 12% of the time, and predicted total goals correlate only 0.23 with actual totals.
+
+This run has line-ups, market values, managers and referees for 98% of matches in every league up to 2025/26, and xG for every Top 5 league match. The current season is thinner (about 40% of matches) until Sofascore has scraped it. Even so, the squad and manager features don't measurably improve the model. Most of their information is probably already in the bookmakers' odds, which the model also uses. The coverage table under **Model accuracy** in the UI shows, per league, how many recent matches have line-ups, player ratings, market values, managers, xG and referees. Each retrain refreshes all of these numbers.
 
 ## Project layout
 
@@ -253,10 +261,17 @@ data/stadiums.csv  geocoded stadiums (committed, hand-editable)
 data/cache/        raw downloads and API responses (git-ignored)
 ```
 
-**Adding a league:** add a line to `LEAGUES` in `data.py`. It needs the football-data.co.uk code, a display name, the fixturedownload.com slug and a country code, for example `"P1": ("Primeira Liga", "primeira-liga", "pt")`. Add the Sofascore tournament id (the number at the end of the league's sofascore.com URL) to `TOURNAMENTS` in `sofascore.py` (`"P1": 238`) and the API-Football league id to `LEAGUE_IDS` in `apifootball.py` (`"P1": 94`), then retrain. Add its Transfermarkt competition code to `COMPETITIONS` in `transfermarkt.py` and, for a league Understat covers, its Understat name to `LEAGUES` in `understat.py`. If a club name maps wrongly, add it to `ALIASES` in `data.py`.
+**Adding a league** (example: Primeira Liga):
+
+1. `LEAGUES` in `data.py`: football-data.co.uk code, display name, fixturedownload.com slug and country code, `"P1": ("Primeira Liga", "primeira-liga", "pt")`.
+2. `COMPETITIONS` in `transfermarkt.py`: Transfermarkt competition code, `"P1": "PO1"`.
+3. `TOURNAMENTS` in `sofascore.py`: the number at the end of the league's sofascore.com URL, `"P1": 238`.
+4. Optional: `LEAGUES` in `understat.py` if Understat covers it, and `LEAGUE_IDS` in `apifootball.py` (`"P1": 94`).
+5. Retrain. If the pipeline warns about ambiguous team names, add them to `ALIASES` in `data.py`.
 
 ## Notes
 
 - `scikit-learn` is pinned to 1.8.0 because Windows Smart App Control blocks a compiled file in 1.9.1.
+- The Transfermarkt dataset stopped updating on 6 July 2026. If it doesn't resume, each new season's line-ups, managers and referees come from Sofascore alone.
 - Data comes from [football-data.co.uk](https://www.football-data.co.uk), [fixturedownload.com](https://fixturedownload.com), [Fantasy Premier League](https://fantasy.premierleague.com) (unofficial API), [vaastav/Fantasy-Premier-League](https://github.com/vaastav/Fantasy-Premier-League), [Transfermarkt](https://www.transfermarkt.com) via [transfermarkt-datasets](https://github.com/dcaribou/transfermarkt-datasets), [Understat](https://understat.com), [Sofascore](https://www.sofascore.com) (scraped, unofficial), [API-Football](https://www.api-football.com), [OpenStreetMap](https://www.openstreetmap.org/copyright), [Open-Meteo](https://open-meteo.com) and Google News. Please respect their terms and rate limits.
 - Predictions are probabilities, not certainties. Don't use them for gambling decisions.

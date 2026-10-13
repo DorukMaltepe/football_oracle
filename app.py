@@ -78,10 +78,7 @@ if st.sidebar.button("Refresh data & retrain", width="stretch") or not PRED.exis
 preds, hist, metrics, stadiums, unavailable = load(PRED.stat().st_mtime)
 st.sidebar.caption(f"Model trained {metrics['trained_at']} on {metrics['trained_on']:,} matches")
 af = metrics.get("api_football", {})
-if not af.get("key_set"):
-    st.sidebar.warning("API-Football key not set: line-ups, managers and injuries outside the Premier League are "
-                       "missing. Get a free key at dashboard.api-football.com and set APIFOOTBALL_KEY.")
-else:
+if af.get("key_set"):  # optional fallback source
     st.sidebar.caption(f"API-Football: {af['used_today']}/{af['daily_budget']} requests used today, "
                        f"{af['fixtures_with_lineups']:,} matches with line-ups cached"
                        + (f", seasons {af['allowed_seasons'][0]}–{af['allowed_seasons'][1]} on this plan" if af.get("allowed_seasons") else ""))
@@ -205,5 +202,5 @@ with st.expander("Model accuracy (backtest)"):
     st.caption(f"Trained on seasons before {metrics['test_from_season']}, tested on {metrics['test_matches']:,} matches "
                "from then on. 'bookmakers' = market average odds converted to probabilities.")
     if "coverage" in metrics:
-        st.markdown("Share of matches since last season with player / manager data")
+        st.markdown("Share of matches since last season with each kind of data")
         st.dataframe(pd.DataFrame(metrics["coverage"]).T.map(lambda v: f"{v:.0%}"), width="stretch")
