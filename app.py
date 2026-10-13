@@ -25,13 +25,21 @@ FORM_LABELS = {
     "v_gf_5": "Home/away form: goals scored", "v_ga_5": "Home/away form: goals conceded",
     "rest": "Days since last league match", "played": "League games played this season",
 }
+SQUAD_LABELS = {
+    "coach_name": "Manager", "mgr_games": "Manager: league games in data", "mgr_ppg": "Manager: points / game",
+    "mgr_team_games": "Manager: games at this club", "mgr_days": "Manager: days in the job",
+    "lu_missing": "Regular starters missing (of 11)", "lu_rating": "Line-up form (player ratings, 0 = average)",
+    "lu_def": "Formation: defenders", "lu_fwd": "Formation: forwards", "lu_out": "Regulars out",
+}
 
 
 @st.cache_data
 def load(_mtime):
     stadiums = pd.read_csv(data.STADIUMS).set_index("team")["stadium"] if data.STADIUMS.exists() else pd.Series()
+    out = data.DATA / "unavailable.pkl"
     return (pd.read_pickle(PRED), pd.read_pickle(data.DATA / "history.pkl"),
-            json.loads((data.DATA / "metrics.json").read_text()), stadiums)
+            json.loads((data.DATA / "metrics.json").read_text()), stadiums,
+            pd.read_pickle(out) if out.exists() else pd.DataFrame(columns=["team", "name", "reason"]))
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -42,6 +50,12 @@ def news(team, league):
     except (requests.RequestException, ET.ParseError):
         return []
     return [(i.findtext("title"), i.findtext("link"), i.findtext("pubDate", "")[:16]) for i in root.iter("item")][:8]
+
+
+def fmt(v):
+    if v is None or v == "" or (isinstance(v, float) and pd.isna(v)):
+        return "–"
+    return f"{v:.2f}".rstrip("0").rstrip(".") if isinstance(v, float) else str(v)
 
 
 def recent(hist, team, n=6):
@@ -59,8 +73,16 @@ if st.sidebar.button("Refresh data & retrain", width="stretch") or not PRED.exis
     with st.spinner("Downloading data, training and predicting (first run takes several minutes)…"):
         pipeline.run()
     st.cache_data.clear()
-preds, hist, metrics, stadiums = load(PRED.stat().st_mtime)
+preds, hist, metrics, stadiums, unavailable = load(PRED.stat().st_mtime)
 st.sidebar.caption(f"Model trained {metrics['trained_at']} on {metrics['trained_on']:,} matches")
+af = metrics.get("api_football", {})
+if not af.get("key_set"):
+    st.sidebar.warning("API-Football key not set: line-ups, managers and injuries outside the Premier League are "
+                       "missing. Get a free key at dashboard.api-football.com and set APIFOOTBALL_KEY.")
+else:
+    st.sidebar.caption(f"API-Football: {af['used_today']}/{af['daily_budget']} requests used today, "
+                       f"{af['fixtures_with_lineups']:,} matches with line-ups cached"
+                       + (f", seasons {af['allowed_seasons'][0]}–{af['allowed_seasons'][1]} on this plan" if af.get("allowed_seasons") else ""))
 leagues = st.sidebar.multiselect("Leagues", list(NAMES), default=list(NAMES), format_func=NAMES.get)
 days = st.sidebar.slider("Days ahead", 1, 180, 14)
 
@@ -126,6 +148,21 @@ if event.selection.rows:
         }
         st.dataframe(pd.Series(ctx, name="").to_frame(), width="stretch")
 
+    st.markdown("**Squad & manager**")
+    st.dataframe(pd.DataFrame({m.HomeTeam: [fmt(m.get(f"h_{k}")) for k in SQUAD_LABELS],
+                               m.AwayTeam: [fmt(m.get(f"a_{k}")) for k in SQUAD_LABELS]},
+                              index=list(SQUAD_LABELS.values())), width="stretch")
+    left, right = st.columns(2)
+    for col, team in ((left, m.HomeTeam), (right, m.AwayTeam)):
+        with col:
+            out = unavailable[unavailable.team == team]
+            st.markdown(f"**{team}: injured / suspended / doubtful** ({len(out)})")
+            if len(out):
+                st.dataframe(out[["name", "reason"]].rename(columns={"name": "Player", "reason": "Reason"}),
+                             hide_index=True, width="stretch")
+            else:
+                st.caption("None reported (or no availability data for this league).")
+
     left, right = st.columns(2)
     for col, team in ((left, m.HomeTeam), (right, m.AwayTeam)):
         with col:
@@ -152,8 +189,11 @@ if event.selection.rows:
                 st.caption("No news found.")
 
 with st.expander("Model accuracy (backtest)"):
-    rows = {k: v for k, v in metrics.items() if isinstance(v, dict)}
+    rows = {k: v for k, v in metrics.items() if isinstance(v, dict) and "accuracy" in v}
     st.dataframe(pd.DataFrame(rows).T.rename(columns={"log_loss": "Log loss (lower is better)", "accuracy": "Accuracy"}),
                  width="stretch")
     st.caption(f"Trained on seasons before {metrics['test_from_season']}, tested on {metrics['test_matches']:,} matches "
                "from then on. 'bookmakers' = market average odds converted to probabilities.")
+    if "coverage" in metrics:
+        st.markdown("Share of matches since last season with player / manager data")
+        st.dataframe(pd.DataFrame(metrics["coverage"]).T.map(lambda v: f"{v:.0%}"), width="stretch")

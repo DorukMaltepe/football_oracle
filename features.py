@@ -10,7 +10,11 @@ STATS = {"gf": ("FTHG", "FTAG"), "ga": ("FTAG", "FTHG"), "sf": ("HS", "AS"), "sa
 FORM = ["pts", *STATS]
 WINDOWS = (5, 10)
 
-TEAM_FEATS = ["elo", "rest", "played", *[f"{c}_{w}" for w in WINDOWS for c in FORM], "v_pts_5", "v_gf_5", "v_ga_5"]
+LINEUP = ["lu_missing", "lu_rating", "lu_def", "lu_fwd"]
+MANAGER = ["mgr_games", "mgr_ppg", "mgr_team_games", "mgr_days"]
+TEAM_FEATS = ["elo", "rest", "played", *[f"{c}_{w}" for w in WINDOWS for c in FORM], "v_pts_5", "v_gf_5", "v_ga_5",
+              *LINEUP, *MANAGER]
+RECENT_DAYS = 45  # line-up data older than this says nothing about the next match
 MARKET = ["mkt_H", "mkt_D", "mkt_A"]
 FEATURES = ["league", "elo_diff", *[f"{s}_{f}" for s in "ha" for f in TEAM_FEATS],
             "h2h_n", "h2h_win", "h2h_draw", "h2h_gd", "ref_n", "ref_hwin", "ref_cards",
@@ -90,18 +94,101 @@ def referee(df):
     return pd.DataFrame({"ref_n": n, "ref_hwin": m.hwin, "ref_cards": m.cards}).reindex(df.index)
 
 
-def build(matches, weather=None):
+def managers(t, coaches):
+    """Coach on match day (from career records) and his record in earlier matches of this dataset."""
+    if coaches is None or coaches.empty:
+        return t.assign(coach_name=None, **{c: np.nan for c in MANAGER})
+    c = coaches.assign(mstart=pd.to_datetime(coaches.start, errors="coerce"),
+                       mend=pd.to_datetime(coaches.end, errors="coerce")).dropna(subset=["mstart"])
+    m = pd.merge_asof(t.reset_index().sort_values("date", kind="stable"),
+                      c[["team", "coach", "coach_name", "mstart", "mend"]].sort_values("mstart"),
+                      left_on="date", right_on="mstart", by="team", direction="backward")
+    m.loc[m.mend < m.date, ["coach", "coach_name", "mstart"]] = np.nan  # last job here had already ended
+    m = m.set_index("index").sort_values(["date", "mid"], kind="stable")
+    has = m.coach.notna()
+    m["mgr_games"] = m.groupby("coach").cumcount().where(has)
+    m["mgr_ppg"] = m.groupby("coach")["pts"].transform(lambda s: s.shift(1).expanding().mean())
+    m["mgr_team_games"] = m.groupby(["coach", "team"]).cumcount().where(has)
+    m["mgr_days"] = (m.date - m.mstart).dt.days
+    return m.drop(columns=["mend"]).sort_index()
+
+
+def squad(df, apps, unavailable=None, formations=None):
+    """Line-up features per side.
+    lu_missing: how many of the team's 11 most-used starters (previous 10 matches) are not in the XI.
+    lu_rating:  mean form of the XI (player rating z-scored per source, averaged over his previous 5 games).
+    lu_def / lu_fwd: defenders / forwards in the formation.
+    Upcoming matches have no XI yet: the regulars minus injured/suspended players stand in for it, and
+    lu_out lists who is missing."""
+    cols = [f"{p}{c}" for p in ("h_", "a_") for c in [*LINEUP, "lu_out"]]
+    out = pd.DataFrame(index=df.index, columns=cols, dtype=object)
+    if apps is None or apps.empty:
+        return out.astype({c: float for c in cols if not c.endswith("lu_out")})
+    keys = ["Div", "Season", "HomeTeam", "AwayTeam"]
+    mid = pd.Series(df.index, index=pd.MultiIndex.from_frame(df[keys])).groupby(level=list(range(4))).first()
+
+    def with_mid(x):
+        x = x.assign(mid=mid.reindex(pd.MultiIndex.from_frame(x[keys])).to_numpy()).dropna(subset=["mid"])
+        return x.assign(mid=x.mid.astype(int), date=df.Date.to_numpy()[x.mid.astype(int)])
+
+    a = with_mid(apps)
+    src = a.player.str.split(":").str[0]
+    a["z"] = a.groupby(src).rating.transform(lambda r: (r - r.mean()) / r.std())
+    a = a.sort_values("date", kind="stable")
+    a["form"] = a.groupby("player").z.transform(lambda s: s.shift(1).rolling(5, min_periods=1).mean())
+    now_form = a.groupby("player").z.apply(lambda s: s.tail(5).mean())
+    starters = a[a.started].groupby(["team", "mid"])
+    xi_players, xi_rating = starters.player.agg(frozenset).to_dict(), starters.form.mean().to_dict()
+    form_of = {}
+    if formations is not None and not formations.empty:
+        f = with_mid(formations).dropna(subset=["formation"])
+        parts = f.formation.str.split("-")
+        f = f.assign(d=pd.to_numeric(parts.str[0], errors="coerce"), w=pd.to_numeric(parts.str[-1], errors="coerce"))
+        form_of = {(t, m): (d, w) for t, m, d, w in zip(f.team, f.mid, f.d, f.w)}
+    gone = {}
+    if unavailable is not None:
+        for t, p, n, r in unavailable[["team", "player", "name", "reason"]].itertuples(index=False):
+            gone.setdefault(t, {})[p] = f"{n} ({r})"
+
+    sides = pd.concat([pd.DataFrame({"mid": df.index, "team": df.HomeTeam, "p": "h_", "date": df.Date, "played": df.FTHG.notna()}),
+                       pd.DataFrame({"mid": df.index, "team": df.AwayTeam, "p": "a_", "date": df.Date, "played": df.FTHG.notna()})])
+    rows = {}
+    for team, g in sides.sort_values(["date", "mid"], kind="stable").groupby("team", sort=False):
+        hist, last_form = [], None  # hist: (date, XI) of matches with line-up data
+        for m, p, d, played in g[["mid", "p", "date", "played"]].itertuples(index=False):
+            counts = {}
+            for _, players in hist[-10:]:
+                for pl in players:
+                    counts[pl] = counts.get(pl, 0) + 1
+            regulars = sorted(counts, key=counts.get, reverse=True)[:11]
+            players = xi_players.get((team, m))
+            if players is not None:
+                rows[(m, p)] = (len(set(regulars) - players) if regulars else np.nan, xi_rating[(team, m)],
+                                *form_of.get((team, m), (np.nan, np.nan)), None)
+                hist.append((d, players))
+                last_form = form_of.get((team, m), last_form)
+            elif not played and regulars and (d - hist[-1][0]).days <= RECENT_DAYS:
+                missing = [gone[team][pl] for pl in regulars if pl in gone.get(team, {})]
+                avail = [now_form.get(pl, np.nan) for pl in regulars if pl not in gone.get(team, {})]
+                rows[(m, p)] = (len(missing), np.nanmean(avail) if avail else np.nan,
+                                *(last_form or (np.nan, np.nan)), "; ".join(missing))
+    for (m, p), vals in rows.items():
+        out.loc[m, [f"{p}{c}" for c in [*LINEUP, "lu_out"]]] = vals
+    return out.astype({c: float for c in cols if not c.endswith("lu_out")})
+
+
+def build(matches, weather=None, apps=None, unavailable=None, formations=None, coaches=None):
     """matches: played + upcoming (NaN goals) rows. Returns one row per match with FEATURES and targets."""
     df = matches.sort_values(["Date", "Div"], kind="stable").reset_index(drop=True)
     df["league"] = df.Div.astype("category")
     df["h_elo"], df["a_elo"] = elo(df)
     df["elo_diff"] = df.h_elo - df.a_elo
-    t = team_form(df)
-    cols = [c for c in TEAM_FEATS if c != "elo"]
+    t = managers(team_form(df), coaches)
+    cols = [c for c in TEAM_FEATS if c != "elo" and c not in LINEUP] + ["coach_name"]
     for venue, p in (("H", "h_"), ("A", "a_")):
         side = t[t.venue == venue].set_index("mid")[cols].add_prefix(p)
         df = df.join(side)
-    df = df.join(head_to_head(df)).join(referee(df))
+    df = df.join(head_to_head(df)).join(referee(df)).join(squad(df, apps, unavailable, formations))
     if weather is not None and len(weather):
         df = df.merge(weather, on=["HomeTeam", "Date"], how="left")
     for c in FEATURES:

@@ -189,19 +189,14 @@ def load_weather(stadiums):
         stale = arch.exists() and time.time() - arch.stat().st_mtime > 60 * 86400  # recent API covers 92 past days
         files = []
         # an 11-year archive call is "heavy" for open-meteo's free quota (~10k/day); missing ones fill in on later runs
-        for attempt in range(2 if archive_ok and (stale or not arch.exists()) else 0):
+        if archive_ok and (stale or not arch.exists()):
             try:
                 _get("https://archive-api.open-meteo.com/v1/archive", arch, True, params={
                     "latitude": lat, "longitude": lon, "start_date": f"{FIRST_SEASON}-07-01",
                     "end_date": str(date.today() - timedelta(days=7)), "daily": daily})
-                break
             except requests.RequestException as e:
-                if attempt == 0 and getattr(e.response, "status_code", None) == 429:
-                    time.sleep(61)  # per-minute limit; a second 429 means the hourly/daily one
-                else:
-                    print(f"weather history paused (rerun later to continue): {e}")
-                    archive_ok = False
-                    break
+                print(f"weather history paused (rerun later to continue): {e}")
+                archive_ok = False
         if arch.exists():
             files.append(arch)
         try:
@@ -211,7 +206,11 @@ def load_weather(stadiums):
         except requests.RequestException as e:
             print(f"weather forecast {team}: {e}")
         for p in files:
-            d = pd.DataFrame(json.loads(p.read_text())["daily"])
+            try:
+                d = pd.DataFrame(json.loads(p.read_text())["daily"])
+            except (ValueError, KeyError):  # truncated download: drop it so the next run refetches
+                p.unlink()
+                continue
             frames.append(pd.DataFrame({"HomeTeam": team, "Date": pd.to_datetime(d["time"]),
                                         "temp": d["temperature_2m_max"], "rain": d["precipitation_sum"],
                                         "wind": d["wind_speed_10m_max"]}))

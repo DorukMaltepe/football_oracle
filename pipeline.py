@@ -4,12 +4,15 @@ from datetime import datetime
 
 import numpy as np
 import pandas as pd
+import requests
 from scipy.stats import poisson
 from sklearn.ensemble import HistGradientBoostingClassifier, HistGradientBoostingRegressor
 from sklearn.metrics import accuracy_score, log_loss
 
+import apifootball
 import data
 import features as F
+import fpl
 
 
 def classifier():
@@ -36,7 +39,8 @@ def backtest(played, season):
     tr, te = played[played.Season < season], played[played.Season >= season]
     te = te[te[F.MARKET].notna().all(axis=1)]
     out = {"test_matches": len(te), "test_from_season": f"{season}/{season + 1}"}
-    for name, cols in (("model", F.FEATURES), ("model_no_odds", F.NO_MARKET)):
+    no_squad = [c for c in F.FEATURES if not any(c.endswith(s) for s in F.LINEUP + F.MANAGER)]
+    for name, cols in (("model", F.FEATURES), ("model_no_odds", F.NO_MARKET), ("model_no_squad_manager", no_squad)):
         p = classifier().fit(tr[cols], tr.result).predict_proba(te[cols])
         out[name] = {"log_loss": log_loss(te.result, p), "accuracy": accuracy_score(te.result, p.argmax(1))}
     p = te[F.MARKET].to_numpy()
@@ -50,10 +54,24 @@ def run():
     upcoming, stadium = data.load_upcoming(results)
     print(f"{len(results)} played matches, {len(upcoming)} upcoming")
     weather = data.load_weather(data.load_stadiums(stadium))
-    df = F.build(pd.concat([results, upcoming], ignore_index=True), weather)
+    try:
+        epl_apps, epl_out = fpl.load(results)
+    except requests.RequestException as e:  # player data is optional: the model handles missing features
+        print(f"FPL: {e}")
+        epl_apps = epl_out = None
+    af = apifootball.load(results)
+    apps = pd.concat([epl_apps, af["apps"]], ignore_index=True)
+    unavailable = pd.concat([epl_out, af["unavailable"]], ignore_index=True)
+    df = F.build(pd.concat([results, upcoming], ignore_index=True), weather,
+                 apps, unavailable, af["formations"], af["coaches"])
     played, future = df[df.FTHG.notna()], df[df.FTHG.isna()].copy()
 
     metrics = backtest(played, data.current_season() - 1)
+    recent = df[df.Season >= data.current_season() - 1]
+    metrics["coverage"] = {data.LEAGUES[d][0]: {"line-ups": float(g.h_lu_missing.notna().mean()),
+                                                "managers": float(g.h_mgr_games.notna().mean())}
+                           for d, g in recent.groupby("Div")}
+    metrics["api_football"] = af["status"]
     print(json.dumps(metrics, indent=1))
 
     # two models: one using bookmaker odds, one without for fixtures whose odds aren't published yet
@@ -72,6 +90,7 @@ def run():
     data.DATA.mkdir(exist_ok=True)
     future.to_pickle(data.DATA / "predictions.pkl")
     played.to_pickle(data.DATA / "history.pkl")
+    unavailable.to_pickle(data.DATA / "unavailable.pkl")
     (data.DATA / "metrics.json").write_text(json.dumps(metrics, indent=1))
 
 
