@@ -67,7 +67,7 @@ def run():
     played, future = df[df.FTHG.notna()], df[df.FTHG.isna()].copy()
 
     metrics = backtest(played, data.current_season() - 1)
-    recent = df[df.Season >= data.current_season() - 1]
+    recent = played[played.Season >= data.current_season() - 1]
     metrics["coverage"] = {data.LEAGUES[d][0]: {"line-ups": float(g.h_lu_missing.notna().mean()),
                                                 "managers": float(g.h_mgr_games.notna().mean())}
                            for d, g in recent.groupby("Div")}

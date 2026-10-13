@@ -163,7 +163,7 @@ Responses are cached on disk forever (lists and injuries are refreshed daily), s
 
 **Line-up features that also work before the line-up is known.** "Regular starters missing" is defined the same way for history (who actually started) and for upcoming matches (who is unavailable). The model learns how much missing regulars matter, and a prediction uses the latest injury list. One trade-off: in history the count also includes rotation, which can't be known in advance.
 
-**Gradient-boosted trees (scikit-learn `HistGradientBoosting*`).** The data is about 27k rows of mixed numbers, a good fit for boosted trees. They handle missing values natively, which matters here. Referees are only published for England, shot statistics are missing for the 2015/16 and 2016/17 Eredivisie and Süper Lig seasons, and weather is unavailable for some stadiums. Missing values go straight to the model; nothing is filled in. The league is used as a native categorical feature.
+**Gradient-boosted trees (scikit-learn `HistGradientBoosting*`).** The data is about 27k rows of mixed numbers, a good fit for boosted trees. They handle missing values natively, which matters here. Referees are only published for England, shot statistics are missing for the 2015/16 and 2016/17 Eredivisie and Süper Lig seasons, player data only covers some seasons, and weather is unavailable for some stadiums. Missing values go straight to the model; nothing is filled in. The league is used as a native categorical feature.
 
 **One feature pipeline for past and future matches.** Upcoming fixtures are added to the match history with blank results, and every feature is computed with `shift(1)`. A match's features therefore come only from earlier matches, whether it was played years ago or kicks off tomorrow. This prevents the most common bug in sports models, leaking the result into the features. It also guarantees training and prediction use identical code. `test_features.py` asserts the no-leakage property.
 
@@ -191,12 +191,15 @@ Backtest from 13 Oct 2026: trained on 2015/16–2024/25, tested on 2,796 matches
 
 | | Accuracy | Log loss (lower is better) |
 |---|---|---|
-| Model (with odds) | 53.0% | 0.980 |
-| Model (no odds) | 52.1% | 0.991 |
+| Model (with odds) | 52.9% | 0.981 |
+| Model (no odds) | 52.2% | 0.991 |
+| Model without squad / manager features | 53.0% | 0.979 |
 | Bookmakers | 53.3% | 0.977 |
 | Always pick home win | 43.6% | – |
 
-The model is roughly level with the bookmakers. That is typical: football has a lot of randomness, and the market already includes information this model can't see, such as line-ups and injuries. Each retrain refreshes these numbers in the UI.
+The model is roughly level with the bookmakers. That is typical: football has a lot of randomness, and the market already prices in line-ups, injuries and manager changes.
+
+These numbers come from a run with Premier League player data only (98% of its matches) and no API-Football key. That's why the squad and manager features make no measurable difference overall yet. Run on the Premier League alone, they gave a small improvement (log loss 1.096 vs 1.103 on 820 matches), but that's too small a sample to be conclusive. With an API-Football key, the "Model without squad / manager features" row shows whether they help across all leagues. The coverage table under **Model accuracy** in the UI shows how much player and manager data each league has. Each retrain refreshes all of these numbers.
 
 ## Project layout
 

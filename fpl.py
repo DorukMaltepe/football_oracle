@@ -44,8 +44,11 @@ def _season(results, y):
     h = gw[home].merge(res, left_on=["Date", "opp"], right_on=["Date", "AwayTeam"]).assign(team=lambda d: d.HomeTeam)
     a = gw[~home].merge(res, left_on=["Date", "opp"], right_on=["Date", "HomeTeam"]).assign(team=lambda d: d.AwayTeam)
     gw = pd.concat([h, a])
-    # shortcut: "starts" exists only from 2022/23; before that 60+ minutes stands in for starting
-    started = gw.starts == 1 if "starts" in gw else gw.minutes >= 60
+    # shortcut: FPL records "starts" only from gameweek 16 of 2022/23; before that 60+ minutes stands in for starting
+    started = gw.minutes >= 60
+    if "starts" in gw:
+        recorded = gw.groupby("fixture").starts.transform("sum") > 0
+        started = started.where(~recorded, gw.starts == 1)
     return pd.DataFrame({"Div": "E0", "Season": y, "HomeTeam": gw.HomeTeam, "AwayTeam": gw.AwayTeam, "team": gw.team,
                          "player": "fpl:" + gw["name"].map(_name), "name": gw["name"].map(_name).str.title(),
                          "started": started, "minutes": gw.minutes, "rating": pd.to_numeric(gw.bps, errors="coerce")})
@@ -85,6 +88,7 @@ def load(results):
     out = [{"team": team[e["team"]], "player": "fpl:" + _name(f"{e['first_name']} {e['second_name']}"),
             "name": e["web_name"], "reason": e["news"] or {"i": "injured", "s": "suspended"}.get(e["status"], "unavailable")}
            for e in boot["elements"]
-           if e["status"] in ("i", "s", "n") or (e["chance_of_playing_next_round"] is not None
-                                                  and e["chance_of_playing_next_round"] < 75)]
+           if e["status"] != "u"  # "u" = left the club (transfer or loan), not a squad absence
+           and (e["status"] in ("i", "s", "n") or (e["chance_of_playing_next_round"] is not None
+                                                    and e["chance_of_playing_next_round"] < 75))]
     return apps, pd.DataFrame(out, columns=["team", "player", "name", "reason"])
